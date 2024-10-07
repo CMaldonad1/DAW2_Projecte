@@ -1,0 +1,148 @@
+CREATE TABLE USUARI(
+    LOGIN VARCHAR2(50) PRIMARY KEY,
+    NOM VARCHAR2(70),
+    PSWD VARCHAR2(40) NOT NULL
+);
+
+CREATE TABLE CATEGORIA(
+    ID NUMBER(10) GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1),
+    NOM VARCHAR2(50) NOT NULL,
+    EDAT_MIN NUMBER(3) NOT NULL,
+    EDAT_MAX NUMBER(3) NOT NULL,
+    CONSTRAINT PK_CATEGORIA PRIMARY KEY (ID),
+    CONSTRAINT SK_NOM UNIQUE (NOM),
+    CONSTRAINT CHK_EDAT_MIN CHECK (EDAT_MIN > 0),
+    CONSTRAINT CHK_EDAT_MAX CHECK (EDAT_MAX >= EDAT_MIN OR EDAT_MAX=NULL)
+);
+
+CREATE TABLE TEMPORADA(
+    ANY_TEMP VARCHAR2(9) PRIMARY KEY
+);
+
+CREATE TABLE EQUIP(
+    ID NUMBER GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1),
+    NOM VARCHAR2(50) NOT NULL,
+    TEMP VARCHAR2(9) CONSTRAINT FK_TEMPORADA REFERENCES TEMPORADA,
+    TIPUS CHAR(1) NOT NULL,
+    CAT NUMBER CONSTRAINT FK_CATEGORIA REFERENCES CATEGORIA,
+    CONSTRAINT PK_EQUIP PRIMARY KEY (ID),
+    CONSTRAINT CHK_TIPUS CHECK(UPPER(TIPUS) IN ('H','D','M')),
+    CONSTRAINT SK_EQUIP_TEMPORADA UNIQUE(NOM, TEMP)
+);
+CREATE INDEX EQUIP_TEMPORADA ON EQUIP(ID,TEMP);
+CREATE INDEX EQUIP_CATEGORIA ON EQUIP(ID,CAT);
+
+CREATE TABLE JUGADOR(
+    ID NUMBER GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1),
+    NOM VARCHAR2(50) NOT NULL,
+    COGNOMS VARCHAR2(100) NOT NULL,
+    SEXE CHAR(1) NOT NULL,
+    DATA_NAIX DATE NOT NULL,
+    ID_LEGAL VARCHAR2(9) NOT NULL,
+    IBAN VARCHAR(40),
+    ANY_FI_REVISIO_MEDICA DATE,
+    ADRECA VARCHAR(100),
+    FOTO VARCHAR(100),
+    CONSTRAINT PK_JUGADOR PRIMARY KEY (ID),
+    CONSTRAINT CHK_SEXE CHECK(UPPER(SEXE) IN ('H','D')),
+    CONSTRAINT CHK_DATA_NAIX CHECK(DATA_NAIX > DATE '1990-01-01'),
+    CONSTRAINT SK_ID_LEGAL UNIQUE (ID_LEGAL)
+);
+CREATE INDEX JUGADOR_REVISIO_MEDICA ON JUGADOR(ID, ANY_FI_REVISIO_MEDICA);
+CREATE INDEX JUGADOR_EDAT ON JUGADOR(ID, DATA_NAIX);
+CREATE INDEX JUGADOR_COGNOMS ON JUGADOR(ID, COGNOMS);
+
+CREATE TABLE TITULARS(
+   JUGADOR NUMBER(4) CONSTRAINT FK_JUGADOR REFERENCES JUGADOR,
+   EQUIP NUMBER(4) CONSTRAINT FK_TITULAR REFERENCES EQUIP,
+   TITULAR NUMBER(1) DEFAULT 0, 
+   CONSTRAINT PK_TITULARS PRIMARY KEY (JUGADOR, EQUIP)
+);
+CREATE INDEX TITULARS_JUGADORS ON TITULARS(JUGADOR,TITULAR);
+
+CREATE OR REPLACE TRIGGER jugador_sexe_equip 
+BEFORE INSERT OR UPDATE OF EQUIP, JUGADOR, TITULAR ON TITULARS
+FOR EACH ROW
+    DECLARE
+        v_anyEquip NUMBER;
+        v_sexeJugador JUGADOR.SEXE%TYPE;
+        v_nomCatJugador CATEGORIA.NOM%TYPE;
+        v_anyNaixement NUMBER;
+        v_tempEquip EQUIP.TEMP%TYPE;
+        v_anysJugador NUMBER;
+        v_sexeEquip EQUIP.TIPUS%TYPE;
+        v_categoriaEquip CATEGORIA.ID%TYPE;
+        v_categoriaJugador CATEGORIA.ID%TYPE;
+    BEGIN
+        SELECT CAT, TIPUS, TEMP, TO_NUMBER(SUBSTR(TEMP,1,4)) INTO v_categoriaEquip, v_sexeEquip, v_tempEquip, v_anyEquip    
+            FROM EQUIP
+            WHERE ID = :NEW.EQUIP;
+
+        SELECT EXTRACT(YEAR FROM DATA_NAIX), SEXE INTO v_anyNaixement, v_sexeJugador
+            FROM JUGADOR
+            WHERE ID = :NEW.JUGADOR;
+
+        v_anysJugador:=v_anyEquip-v_anyNaixement;
+
+        SELECT ID, NOM INTO v_categoriaJugador, v_nomCatJugador 
+            FROM CATEGORIA
+            WHERE EDAT_MIN <= v_anysJugador
+            AND EDAT_MAX >= v_anysJugador;
+
+        IF v_sexeEquip!=v_sexeJugador AND v_sexeEquip!='M' THEN
+            raise_application_error(-20000,'El sexe del jugador '||v_sexeJugador||' no es compatible amb el sexe de l''equip '||v_sexeEquip);
+        ELSE
+            IF v_categoriaJugador>v_categoriaEquip THEN
+                raise_application_error(-20001,'El jugador no es pot inscriure en aquest equip ja que es de una categoria inferior a la seva ('||v_nomCatJugador||')');
+            ELSE    
+                IF v_categoriaJugador!=v_categoriaEquip AND :NEW.TITULAR=1 THEN
+                    raise_application_error(-20002,'El jugador només pot ser titular d''equips de la categoria '||v_nomCatJugador);
+                END IF;
+            END IF;
+        END IF;
+    END;
+
+CREATE OR REPLACE TRIGGER TITULARS_AFTER_UPDATE
+AFTER INSERT OR UPDATE OF JUGADOR, EQUIP, TITULAR ON TITULARS
+FOR EACH ROW  
+    DECLARE
+        PRAGMA AUTONOMUS_TRANSACTION;
+        v_titularEquip NUMBER;
+        v_pertanyEquip NUMBER;
+    BEGIN
+        SELECT COUNT(*) INTO v_titularEquip FROM TITULARS
+            WHERE JUGADOR=:NEW.JUGADOR
+            AND TITULAR=1
+            AND EQUIP IN (SELECT ID FROM EQUIP
+                                WHERE TEMP=(SELECT TEMP FROM EQUIP
+                                                WHERE ID=:NEW.EQUIP));
+        SELECT COUNT(*) INTO v_pertanyEquip FROM TITULARS
+            WHERE JUGADOR=:NEW.JUGADOR
+            AND EQUIP IN (SELECT ID FROM EQUIP
+                                WHERE TEMP=(SELECT TEMP FROM EQUIP
+                                                WHERE ID=:NEW.EQUIP));
+
+        IF v_pertanyEquip>0 THEN
+            IF v_titularEquip>0 AND :NEW.TITULAR=1 THEN
+                UPDATE TITULARS SET TITULAR=0 
+                    WHERE JUGADOR=:NEW.JUGADOR
+                    AND EQUIP!=:NEW.EQUIP;
+                COMMIT;
+            END IF
+        ELSE
+            UPDATE TITULARS SET TITULAR=1 
+                WHERE JUGADOR=:NEW.JUGADOR
+                AND EQUIP=:NEW.EQUIP;
+            COMMIT;
+        END IF;
+    END;
+
+INSERT INTO USUARI VALUES ('Admin','Admin','Admin1234');
+INSERT INTO USUARI VALUES ('Mavi', 'Cristian','Entrenador1');
+INSERT INTO USUARI VALUES ('Nere', 'Nerea','Entrenadora2');
+INSERT INTO CATEGORIA (NOM, EDAT_MIN, EDAT_MAX) VALUES ('Benjamí',7,8);
+INSERT INTO CATEGORIA (NOM, EDAT_MIN, EDAT_MAX) VALUES ('Aleví',9,10);
+INSERT INTO CATEGORIA (NOM, EDAT_MIN, EDAT_MAX) VALUES ('Infantil',12,13);
+INSERT INTO CATEGORIA (NOM, EDAT_MIN, EDAT_MAX) VALUES ('Cadet',14,15);
+INSERT INTO CATEGORIA (NOM, EDAT_MIN, EDAT_MAX) VALUES ('Juvenil',16,17);
+INSERT INTO CATEGORIA (NOM, EDAT_MIN, EDAT_MAX) VALUES ('Senior',18,21);
